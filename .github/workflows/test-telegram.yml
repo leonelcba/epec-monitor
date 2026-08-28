@@ -1,15 +1,103 @@
-name: Probar Telegram
+```yaml
+name: Prueba Telegram EPEC
 
 on:
   workflow_dispatch:
 
 jobs:
-  test:
+  test-telegram:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Enviar mensaje de prueba
+      - name: Probar detección y Telegram
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
-            -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
-            --data-urlencode text="✅ Prueba exitosa. GitHub Actions puede enviar mensajes a Telegram."
+          node <<'NODE'
+          const tweet = {
+            id: '2093425408104374692',
+            time: '2026-08-28T19:48:05.000Z',
+            text: 'Barrios Costa Canal, Hermana Sierra, 2 de Septiembre, Habitaciones Más y Argüello Lourdes restricción de servicio en forma parcial por mantenimiento correctivo. Se trabaja en el sector. Informamos al normalizar.',
+            link: 'https://x.com/EpecOficial/status/2093425408104374692'
+          };
+
+          const keywords = ['falla', 'mantenimiento'];
+
+          function normalize(text) {
+            return String(text || '')
+              .toLowerCase()
+              .normalize('NFD')
+              .replace(/[\u0300-\u036f]/g, '');
+          }
+
+          const normalizedText = normalize(tweet.text);
+
+          const matched = keywords.filter(keyword =>
+            normalizedText.includes(normalize(keyword))
+          );
+
+          console.log('');
+          console.log('==========================================');
+          console.log('PRUEBA CONTROLADA TELEGRAM');
+          console.log('==========================================');
+          console.log('');
+
+          console.log('Publicación:', tweet.id);
+          console.log('Palabras detectadas:', matched.join(', '));
+
+          if (matched.length === 0) {
+            throw new Error(
+              'La publicación no contiene ninguna palabra monitoreada.'
+            );
+          }
+
+          const argentinaDate = new Intl.DateTimeFormat(
+            'es-AR',
+            {
+              timeZone: 'America/Argentina/Cordoba',
+              year: 'numeric',
+              month: '2-digit',
+              day: '2-digit',
+              hour: '2-digit',
+              minute: '2-digit',
+              second: '2-digit',
+              hour12: false
+            }
+          ).format(new Date(tweet.time));
+
+          const message =
+            `🚨 PRUEBA MONITOR EPEC\n\n` +
+            `${tweet.text}\n\n` +
+            `🔎 Detectado: ${matched.join(' / ')}\n` +
+            `🕐 ${argentinaDate}\n` +
+            `🔗 ${tweet.link}`;
+
+          const response = await fetch(
+            `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`,
+            {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify({
+                chat_id: process.env.TELEGRAM_CHAT_ID,
+                text: message,
+                disable_web_page_preview: false
+              })
+            }
+          );
+
+          const result = await response.json();
+
+          if (!result.ok) {
+            throw new Error(
+              `Telegram respondió con error: ${JSON.stringify(result)}`
+            );
+          }
+
+          console.log('');
+          console.log('✅ MENSAJE ENVIADO CORRECTAMENTE A TELEGRAM');
+          console.log('');
+          NODE
+```
