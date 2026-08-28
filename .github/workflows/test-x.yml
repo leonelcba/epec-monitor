@@ -1,4 +1,4 @@
-name: Probar publicaciones EPEC
+name: Buscar Estacion Flores
 
 on:
   workflow_dispatch:
@@ -8,6 +8,6 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Consultar últimas publicaciones de EPEC
+      - name: Buscar Estación Flores
         run: |
-          npx --yes xactions tweets EpecOficial --limit 20
+          npx --yes xactions search 'from:EpecOficial "Estación Flores"' --limit 20
