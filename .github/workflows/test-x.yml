@@ -39,13 +39,13 @@ jobs:
           mkdir -p data
 
           if [ ! -f data/epec-state.json ]; then
-            echo '{"last_seen_id":null,"initialized":false}' > data/epec-state.json
+            echo '{"initialized":false,"last_seen_id":null,"last_seen_time":null}' > data/epec-state.json
           fi
 
           echo "Estado actual:"
           cat data/epec-state.json
 
-      - name: Crear monitor
+      - name: Ejecutar monitor EPEC
         env:
           X_AUTH_TOKEN: ${{ secrets.X_AUTH_TOKEN }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -61,6 +61,30 @@ jobs:
           const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
           const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
+          /*
+          ==========================================================
+          PALABRAS CLAVE
+          ==========================================================
+
+          MODIFICÁ SOLAMENTE ESTA LISTA SI QUERÉS CAMBIAR
+          LAS PALABRAS QUE EL MONITOR DEBE BUSCAR.
+
+          Ejemplo:
+
+          const KEYWORDS = [
+            'corte',
+            'emergencia',
+            'transformador'
+          ];
+
+          ==========================================================
+          */
+
+          const KEYWORDS = [
+            'falla',
+            'mantenimiento'
+          ];
+
           if (!X_AUTH_TOKEN) {
             throw new Error('Falta el Secret X_AUTH_TOKEN');
           }
@@ -73,11 +97,6 @@ jobs:
             throw new Error('Falta el Secret TELEGRAM_CHAT_ID');
           }
 
-          const KEYWORDS = [
-            'falla',
-            'mantenimiento'
-          ];
-
           function normalize(text) {
             return String(text || '')
               .toLowerCase()
@@ -85,21 +104,24 @@ jobs:
               .replace(/[\u0300-\u036f]/g, '');
           }
 
-          function containsKeyword(text) {
-            const normalized = normalize(text);
+          function getMatchedKeywords(text) {
+            const normalizedText = normalize(text);
 
-            return KEYWORDS.some(keyword =>
-              normalized.includes(normalize(keyword))
+            return KEYWORDS.filter(keyword =>
+              normalizedText.includes(normalize(keyword))
             );
           }
 
           function loadState() {
             try {
-              return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+              return JSON.parse(
+                fs.readFileSync(STATE_FILE, 'utf8')
+              );
             } catch {
               return {
+                initialized: false,
                 last_seen_id: null,
-                initialized: false
+                last_seen_time: null
               };
             }
           }
@@ -111,12 +133,7 @@ jobs:
             );
           }
 
-          async function sendTelegram(tweet) {
-            const url =
-              `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
-
-            const date = new Date(tweet.time);
-
+          async function sendTelegram(tweet, matchedKeywords) {
             const argentinaDate = new Intl.DateTimeFormat(
               'es-AR',
               {
@@ -129,29 +146,29 @@ jobs:
                 second: '2-digit',
                 hour12: false
               }
-            ).format(date);
-
-            const matchedKeywords = KEYWORDS.filter(keyword =>
-              normalize(tweet.text).includes(normalize(keyword))
-            );
+            ).format(new Date(tweet.time));
 
             const message =
-              `🚨 EPEC - ${matchedKeywords.join(' / ')}\n\n` +
+              `🚨 EPEC - ALERTA\n\n` +
               `${tweet.text}\n\n` +
+              `🔎 Detectado: ${matchedKeywords.join(' / ')}\n` +
               `🕐 ${argentinaDate}\n` +
               `🔗 ${tweet.link}`;
 
-            const response = await fetch(url, {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json'
-              },
-              body: JSON.stringify({
-                chat_id: TELEGRAM_CHAT_ID,
-                text: message,
-                disable_web_page_preview: false
-              })
-            });
+            const response = await fetch(
+              `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+              {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                  chat_id: TELEGRAM_CHAT_ID,
+                  text: message,
+                  disable_web_page_preview: false
+                })
+              }
+            );
 
             const result = await response.json();
 
@@ -161,30 +178,22 @@ jobs:
               );
             }
 
-            console.log('✅ Alerta enviada a Telegram:', tweet.id);
+            console.log(
+              `✅ Telegram: alerta enviada para ${tweet.id}`
+            );
           }
 
-          (async () => {
-            console.log('');
-            console.log('==========================================');
-            console.log('MONITOR EPEC');
-            console.log('==========================================');
-            console.log('');
-
-            const state = loadState();
-
-            console.log('Estado:');
-            console.log(JSON.stringify(state, null, 2));
-            console.log('');
-
+          async function getTweets() {
             const browser = await chromium.launch({
               headless: true
             });
 
             const context = await browser.newContext({
               userAgent:
-                'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 ' +
-                '(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+                'Mozilla/5.0 (X11; Linux x86_64) ' +
+                'AppleWebKit/537.36 ' +
+                '(KHTML, like Gecko) ' +
+                'Chrome/131.0.0.0 Safari/537.36'
             });
 
             await context.addCookies([
@@ -203,15 +212,23 @@ jobs:
 
             console.log('Abriendo @EpecOficial...');
 
-            await page.goto('https://x.com/EpecOficial', {
-              waitUntil: 'domcontentloaded',
-              timeout: 60000
-            });
+            await page.goto(
+              'https://x.com/EpecOficial',
+              {
+                waitUntil: 'domcontentloaded',
+                timeout: 60000
+              }
+            );
 
             await page.waitForTimeout(5000);
 
             console.log('URL:', page.url());
-            console.log('');
+
+            await page.locator(
+              'article[data-testid="tweet"]'
+            ).first()
+              .waitFor({ timeout: 30000 })
+              .catch(() => {});
 
             const tweets = await page.locator(
               'article[data-testid="tweet"]'
@@ -223,20 +240,28 @@ jobs:
                     ?.innerText || '';
 
                 const time =
-                  article.querySelector('time')
+                  article
+                    .querySelector('time')
                     ?.getAttribute('datetime') || '';
 
                 const link =
-                  [...article.querySelectorAll('a[href*="/status/"]')]
-                    .map(a => a.href)
-                    .find(href => href.includes('/status/')) || '';
+                  [...article.querySelectorAll(
+                    'a[href*="/status/"]'
+                  )]
+                  .map(a => a.href)
+                  .find(href =>
+                    href.includes('/status/')
+                  ) || '';
 
-                const match = link.match(/\/status\/(\d+)/);
+                const match =
+                  link.match(/\/status\/(\d+)/);
 
                 return {
                   id: match ? match[1] : '',
                   time,
-                  text: text.replace(/\s+/g, ' ').trim(),
+                  text: text
+                    .replace(/\s+/g, ' ')
+                    .trim(),
                   link
                 };
               });
@@ -244,43 +269,78 @@ jobs:
 
             await browser.close();
 
-            const validTweets = tweets
-              .filter(tweet => tweet.id && tweet.time)
+            return tweets
+              .filter(tweet =>
+                tweet.id &&
+                tweet.time &&
+                tweet.link
+              )
               .sort(
                 (a, b) =>
-                  new Date(a.time) - new Date(b.time)
+                  new Date(a.time) -
+                  new Date(b.time)
               );
+          }
 
+          (async () => {
+            console.log('');
+            console.log('==========================================');
+            console.log('MONITOR EPEC');
+            console.log('==========================================');
+            console.log('');
+
+            console.log('Palabras monitoreadas:');
+            console.log(KEYWORDS.join(', '));
+            console.log('');
+
+            const state = loadState();
+
+            console.log('Estado actual:');
             console.log(
-              `Publicaciones encontradas: ${validTweets.length}`
+              JSON.stringify(state, null, 2)
             );
             console.log('');
 
-            if (validTweets.length === 0) {
+            const tweets = await getTweets();
+
+            console.log('');
+            console.log(
+              `Publicaciones encontradas: ${tweets.length}`
+            );
+            console.log('');
+
+            if (tweets.length === 0) {
               throw new Error(
                 'No se encontraron publicaciones de EPEC.'
               );
             }
 
-            const newest = validTweets[validTweets.length - 1];
+            const newest =
+              tweets[tweets.length - 1];
 
-            console.log('Publicación más reciente:');
+            console.log(
+              'Publicación más reciente:'
+            );
             console.log(newest.time);
             console.log(newest.id);
             console.log(newest.text);
             console.log('');
 
-            // ==========================================
+            // =====================================================
             // PRIMERA EJECUCIÓN
-            // ==========================================
+            // =====================================================
 
-            if (!state.initialized || !state.last_seen_id) {
+            if (
+              !state.initialized ||
+              !state.last_seen_id
+            ) {
               console.log(
                 '🟡 Primera ejecución: inicializando estado.'
               );
 
-              state.last_seen_id = newest.id;
               state.initialized = true;
+              state.last_seen_id = newest.id;
+              state.last_seen_time = newest.time;
 
               saveState(state);
 
@@ -289,35 +349,40 @@ jobs:
               );
 
               console.log(
-                'No se enviarán publicaciones históricas a Telegram.'
+                'No se enviarán publicaciones históricas.'
               );
 
               process.exit(0);
             }
 
-            // ==========================================
+            // =====================================================
             // BUSCAR PUBLICACIONES NUEVAS
-            // ==========================================
+            // =====================================================
 
-            const lastSeenIndex = validTweets.findIndex(
-              tweet => tweet.id === state.last_seen_id
-            );
+            let newTweets = [];
 
-            let newTweets;
+            const lastSeenIndex =
+              tweets.findIndex(
+                tweet =>
+                  tweet.id === state.last_seen_id
+              );
 
             if (lastSeenIndex >= 0) {
-              newTweets = validTweets.slice(lastSeenIndex + 1);
+              newTweets =
+                tweets.slice(lastSeenIndex + 1);
             } else {
-              // Si el ID anterior ya no aparece entre las
-              // publicaciones visibles, tomamos solamente
-              // las publicaciones muy recientes.
-              const lastSeenTime = state.last_seen_time
-                ? new Date(state.last_seen_time).getTime()
-                : 0;
+              const lastSeenTime =
+                state.last_seen_time
+                  ? new Date(
+                      state.last_seen_time
+                    ).getTime()
+                  : 0;
 
-              newTweets = validTweets.filter(tweet =>
-                new Date(tweet.time).getTime() > lastSeenTime
-              );
+              newTweets =
+                tweets.filter(tweet =>
+                  new Date(tweet.time).getTime() >
+                  lastSeenTime
+                );
             }
 
             console.log(
@@ -325,45 +390,61 @@ jobs:
             );
             console.log('');
 
-            // ==========================================
-            // PROCESAR NUEVAS
-            // ==========================================
+            // =====================================================
+            // PROCESAR PUBLICACIONES NUEVAS
+            // =====================================================
 
             for (const tweet of newTweets) {
-              console.log('------------------------------------------');
+              console.log(
+                '------------------------------------------'
+              );
+
               console.log(tweet.time);
               console.log(tweet.id);
               console.log(tweet.text);
-              console.log('');
 
-              if (containsKeyword(tweet.text)) {
+              const matchedKeywords =
+                getMatchedKeywords(tweet.text);
+
+              if (matchedKeywords.length > 0) {
                 console.log(
-                  '🔔 Contiene "falla" o "mantenimiento".'
+                  `🔔 Palabras detectadas: ${matchedKeywords.join(', ')}`
                 );
 
-                await sendTelegram(tweet);
+                await sendTelegram(
+                  tweet,
+                  matchedKeywords
+                );
               } else {
                 console.log(
-                  'ℹ️ No contiene ninguna palabra monitoreada.'
+                  'ℹ️ No contiene palabras monitoreadas.'
                 );
               }
+
+              console.log('');
             }
 
-            // ==========================================
+            // =====================================================
             // ACTUALIZAR ESTADO
-            // ==========================================
+            // =====================================================
 
+            state.initialized = true;
             state.last_seen_id = newest.id;
             state.last_seen_time = newest.time;
-            state.initialized = true;
 
             saveState(state);
 
+            console.log(
+              '=========================================='
+            );
+            console.log(
+              'MONITOR FINALIZADO'
+            );
+            console.log(
+              '=========================================='
+            );
             console.log('');
-            console.log('==========================================');
-            console.log('MONITOR FINALIZADO');
-            console.log('==========================================');
-            console.log('');
+
             console.log(
               `Último ID guardado: ${state.last_seen_id}`
             );
@@ -373,19 +454,14 @@ jobs:
             console.error('❌ ERROR:');
             console.error(error);
             console.error('');
+
             process.exit(1);
           });
           NODE
 
-      - name: Ejecutar monitor
-        env:
-          X_AUTH_TOKEN: ${{ secrets.X_AUTH_TOKEN }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: |
           node monitor-epec.js
 
-      - name: Guardar estado en GitHub
+      - name: Guardar estado
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -395,6 +471,6 @@ jobs:
           if git diff --cached --quiet; then
             echo "No hay cambios en el estado."
           else
-            git commit -m "Actualizar estado del monitor EPEC"
+            git commit -m "Actualizar estado monitor EPEC"
             git push
           fi
