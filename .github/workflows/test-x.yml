@@ -1,4 +1,4 @@
-name: Probar EPEC
+name: Probar publicaciones EPEC
 
 on:
   workflow_dispatch:
@@ -8,11 +8,6 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Instalar Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-
-      - name: Consultar EPEC
+      - name: Consultar últimas publicaciones de EPEC
         run: |
-          npx --yes xactions tweets EpecOficial --limit 5
+          npx --yes xactions tweets EpecOficial --limit 20
