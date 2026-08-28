@@ -1,0 +1,89 @@
+name: Prueba alerta Falla
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Consultar publicaciones de EPEC
+        run: |
+          npx --yes xactions tweets EpecOficial --limit 20 > tweets-output.txt
+
+          node <<'NODE'
+          const fs = require('fs');
+
+          const output = fs.readFileSync('tweets-output.txt', 'utf8');
+
+          const start = output.lastIndexOf('\n[');
+          const jsonText = start >= 0
+            ? output.slice(start + 1).trim()
+            : output.slice(output.indexOf('[')).trim();
+
+          const tweets = JSON.parse(jsonText);
+
+          // Buscar una publicación que contenga "falla".
+          const found = tweets.find(tweet => {
+            const text = String(tweet.fullText || tweet.text || '');
+
+            return text
+              .normalize('NFD')
+              .replace(/[\u0300-\u036f]/g, '')
+              .toLowerCase()
+              .includes('falla');
+          });
+
+          if (!found) {
+            console.error('No se encontró ninguna publicación con la palabra "falla".');
+            process.exit(1);
+          }
+
+          fs.writeFileSync(
+            'test-tweet.json',
+            JSON.stringify(found, null, 2)
+          );
+
+          console.log('Publicación encontrada:');
+          console.log(found.fullText || found.text);
+          console.log('ID:', found.id);
+          console.log('Fecha:', found.timeParsed);
+          NODE
+
+      - name: Enviar alerta de prueba a Telegram
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+          const { execFileSync } = require('child_process');
+
+          const tweet = JSON.parse(
+            fs.readFileSync('test-tweet.json', 'utf8')
+          );
+
+          const text = String(tweet.fullText || tweet.text || '');
+          const id = String(tweet.id);
+
+          const url =
+            tweet.permanentUrl ||
+            `https://x.com/EpecOficial/status/${id}`;
+
+          const message =
+            `🧪 PRUEBA DEL MONITOR EPEC\n\n` +
+            `🔎 Palabra detectada: "falla"\n\n` +
+            `${text}\n\n` +
+            `🔗 ${url}`;
+
+          execFileSync('curl', [
+            '-s',
+            '-X', 'POST',
+            `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`,
+            '-d', `chat_id=${process.env.TELEGRAM_CHAT_ID}`,
+            '--data-urlencode', `text=${message}`
+          ]);
+
+          console.log('✅ Alerta de prueba enviada a Telegram.');
+          NODE
