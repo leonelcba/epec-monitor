@@ -1,49 +1,192 @@
-name: Comprobar orden EPEC
+```yaml
+name: Etapa 1 - Probar sesión X
 
 on:
   workflow_dispatch:
 
 jobs:
-  test:
+  test-x-login:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Obtener publicaciones
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Instalar Playwright
         run: |
-          npx --yes xactions tweets EpecOficial --limit 50 > tweets-output.txt
+          npm init -y
+          npm install playwright
+          npx playwright install --with-deps chromium
 
-      - name: Mostrar fechas de las publicaciones
+      - name: Crear script de prueba
+        env:
+          X_AUTH_TOKEN: ${{ secrets.X_AUTH_TOKEN }}
         run: |
-          node <<'NODE'
-          const fs = require('fs');
+          cat > test-x.js <<'NODE'
+          const { chromium } = require('playwright');
 
-          const output = fs.readFileSync('tweets-output.txt', 'utf8');
+          (async () => {
+            console.log('');
+            console.log('==========================================');
+            console.log('ETAPA 1 - PRUEBA DE SESIÓN DE X');
+            console.log('==========================================');
+            console.log('');
 
-          const start = output.lastIndexOf('\n[');
-          const jsonText = start >= 0
-            ? output.slice(start + 1).trim()
-            : output.slice(output.indexOf('[')).trim();
+            if (!process.env.X_AUTH_TOKEN) {
+              throw new Error(
+                'No existe el Secret X_AUTH_TOKEN en GitHub.'
+              );
+            }
 
-          const tweets = JSON.parse(jsonText);
+            const browser = await chromium.launch({
+              headless: true
+            });
 
-          tweets.sort((a, b) =>
-            Number(b.timestamp || 0) - Number(a.timestamp || 0)
-          );
+            const context = await browser.newContext({
+              userAgent:
+                'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 ' +
+                '(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+            });
 
-          console.log('');
-          console.log('==========================================');
-          console.log('PUBLICACIONES DE EPEC ORDENADAS POR FECHA');
-          console.log('==========================================');
-          console.log('');
+            // Cookie de autenticación de X.
+            await context.addCookies([
+              {
+                name: 'auth_token',
+                value: process.env.X_AUTH_TOKEN,
+                domain: '.x.com',
+                path: '/',
+                httpOnly: true,
+                secure: true,
+                sameSite: 'Lax'
+              }
+            ]);
 
-          for (const tweet of tweets) {
-            const date = tweet.timeParsed || 'SIN FECHA';
-            const text = String(tweet.fullText || tweet.text || '')
-              .replace(/\n/g, ' ');
+            const page = await context.newPage();
 
-            console.log(`${date} | ${tweet.id} | ${text.substring(0, 120)}`);
-          }
+            console.log('Abriendo X...');
+            await page.goto('https://x.com/home', {
+              waitUntil: 'domcontentloaded',
+              timeout: 60000
+            });
 
-          console.log('');
-          console.log(`Total de publicaciones recibidas: ${tweets.length}`);
+            await page.waitForTimeout(5000);
+
+            console.log('');
+            console.log('URL actual:');
+            console.log(page.url());
+            console.log('');
+
+            const title = await page.title();
+
+            console.log('Título:');
+            console.log(title);
+            console.log('');
+
+            // Comprobamos si X considera que estamos autenticados.
+            const loginLinks = await page.locator(
+              'a[href="/login"]'
+            ).count();
+
+            if (loginLinks > 0 || page.url().includes('/login')) {
+              console.log('❌ X NO reconoce la sesión.');
+              console.log('');
+              await browser.close();
+              process.exit(1);
+            }
+
+            console.log('✅ X reconoce la sesión.');
+            console.log('');
+
+            console.log('==========================================');
+            console.log('ABRIENDO @EpecOficial');
+            console.log('==========================================');
+            console.log('');
+
+            await page.goto('https://x.com/EpecOficial', {
+              waitUntil: 'domcontentloaded',
+              timeout: 60000
+            });
+
+            await page.waitForTimeout(5000);
+
+            console.log('URL de EPEC:');
+            console.log(page.url());
+            console.log('');
+
+            // Esperamos a que aparezcan tweets.
+            await page.locator('article[data-testid="tweet"]')
+              .first()
+              .waitFor({ timeout: 30000 })
+              .catch(() => {});
+
+            const tweets = await page.locator(
+              'article[data-testid="tweet"]'
+            ).evaluateAll(articles => {
+              return articles.map(article => {
+                const text =
+                  article
+                    .querySelector('[data-testid="tweetText"]')
+                    ?.innerText || '';
+
+                const time =
+                  article.querySelector('time')?.getAttribute('datetime') ||
+                  '';
+
+                const link =
+                  [...article.querySelectorAll('a[href*="/status/"]')]
+                    .map(a => a.href)
+                    .find(href => href.includes('/status/')) || '';
+
+                return {
+                  time,
+                  text: text.replace(/\s+/g, ' ').trim(),
+                  link
+                };
+              });
+            });
+
+            console.log('');
+            console.log('==========================================');
+            console.log('PUBLICACIONES VISIBLES DE @EpecOficial');
+            console.log('==========================================');
+            console.log('');
+
+            if (tweets.length === 0) {
+              console.log('❌ No se encontraron publicaciones.');
+            } else {
+              for (const tweet of tweets) {
+                console.log(
+                  `${tweet.time || 'SIN FECHA'} | ` +
+                  `${tweet.link || 'SIN LINK'} | ` +
+                  `${tweet.text.substring(0, 200)}`
+                );
+              }
+            }
+
+            console.log('');
+            console.log(
+              `Total de publicaciones encontradas: ${tweets.length}`
+            );
+            console.log('');
+
+            await browser.close();
+          })().catch(error => {
+            console.error('');
+            console.error('❌ ERROR:');
+            console.error(error);
+            console.error('');
+            process.exit(1);
+          });
           NODE
+
+      - name: Ejecutar prueba
+        env:
+          X_AUTH_TOKEN: ${{ secrets.X_AUTH_TOKEN }}
+        run: |
+          node test-x.js
+```
