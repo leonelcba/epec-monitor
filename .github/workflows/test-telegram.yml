@@ -1,4 +1,3 @@
-```yaml
 name: Prueba Telegram EPEC
 
 on:
@@ -100,4 +99,3 @@ jobs:
           console.log('✅ MENSAJE ENVIADO CORRECTAMENTE A TELEGRAM');
           console.log('');
           NODE
-```
