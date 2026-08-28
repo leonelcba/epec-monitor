@@ -1,13 +1,198 @@
-name: Buscar Estacion Flores
+name: Monitor EPEC - Estacion Flores
 
 on:
   workflow_dispatch:
 
+  schedule:
+    - cron: "*/5 * * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: monitor-epec
+  cancel-in-progress: true
+
 jobs:
-  test:
+  monitor:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Buscar Estación Flores
+      - name: Descargar estado del repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Consultar publicaciones de EPEC
         run: |
-          npx --yes xactions search 'from:EpecOficial "Estación Flores"' --limit 20
+          mkdir -p data
+
+          npx --yes xactions tweets EpecOficial --limit 50 > tweets-output.txt
+
+          node <<'NODE'
+          const fs = require('fs');
+
+          const output = fs.readFileSync('tweets-output.txt', 'utf8');
+
+          // XActions imprime información antes del JSON.
+          // Buscamos el último bloque JSON que comienza con [ y termina con ].
+          const start = output.lastIndexOf('\n[');
+          const jsonText = start >= 0
+            ? output.slice(start + 1).trim()
+            : output.slice(output.indexOf('[')).trim();
+
+          try {
+            const tweets = JSON.parse(jsonText);
+            fs.writeFileSync('tweets.json', JSON.stringify(tweets, null, 2));
+            console.log(`Se obtuvieron ${tweets.length} publicaciones.`);
+          } catch (error) {
+            console.error('No se pudo interpretar la respuesta de XActions.');
+            console.error(output);
+            process.exit(1);
+          }
+          NODE
+
+      - name: Procesar publicaciones
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+          const { execFileSync } = require('child_process');
+
+          const tweets = JSON.parse(fs.readFileSync('tweets.json', 'utf8'));
+
+          const stateFile = 'data/epec-state.json';
+
+          let state = {
+            initialized: false,
+            lastSeenTimestamp: 0,
+            processedIds: []
+          };
+
+          if (fs.existsSync(stateFile)) {
+            try {
+              state = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+            } catch {
+              console.log('No se pudo leer el estado anterior. Se creará uno nuevo.');
+            }
+          }
+
+          // Ordenar de la publicación más nueva a la más antigua.
+          tweets.sort((a, b) => {
+            return Number(b.timestamp || 0) - Number(a.timestamp || 0);
+          });
+
+          // Primera ejecución:
+          // solamente establecer el punto de partida.
+          if (!state.initialized) {
+            const newestTimestamp = tweets.length
+              ? Math.max(...tweets.map(t => Number(t.timestamp || 0)))
+              : 0;
+
+            state.initialized = true;
+            state.lastSeenTimestamp = newestTimestamp;
+            state.processedIds = tweets
+              .map(t => String(t.id))
+              .filter(Boolean);
+
+            fs.mkdirSync('data', { recursive: true });
+            fs.writeFileSync(stateFile, JSON.stringify(state, null, 2));
+
+            console.log('Primera ejecución completada.');
+            console.log('Se estableció el punto de partida.');
+            console.log('NO se enviarán notificaciones de publicaciones anteriores.');
+
+            process.exit(0);
+          }
+
+          const previousTimestamp = Number(state.lastSeenTimestamp || 0);
+          const processed = new Set((state.processedIds || []).map(String));
+
+          const newTweets = tweets.filter(tweet => {
+            const id = String(tweet.id);
+            const timestamp = Number(tweet.timestamp || 0);
+
+            return (
+              timestamp > previousTimestamp ||
+              (timestamp === previousTimestamp && !processed.has(id))
+            );
+          });
+
+          console.log(`Publicaciones nuevas detectadas: ${newTweets.length}`);
+
+          let newestTimestamp = previousTimestamp;
+
+          for (const tweet of newTweets) {
+            const id = String(tweet.id);
+            const timestamp = Number(tweet.timestamp || 0);
+            const text = String(tweet.fullText || tweet.text || '');
+
+            if (timestamp > newestTimestamp) {
+              newestTimestamp = timestamp;
+            }
+
+            processed.add(id);
+
+            // Normalizamos mayúsculas/minúsculas y acentos.
+            // Así también detecta "Estacion Flores" si alguna vez
+            // EPEC lo escribe sin tilde.
+            const normalizedText = text
+              .normalize('NFD')
+              .replace(/[\u0300-\u036f]/g, '')
+              .toLowerCase();
+
+            const keyword = 'estacion flores';
+
+            if (normalizedText.includes(keyword)) {
+              const url = tweet.permanentUrl ||
+                `https://x.com/EpecOficial/status/${id}`;
+
+              const message =
+                `🚨 EPEC mencionó "Estación Flores"\n\n` +
+                `${text}\n\n` +
+                `🔗 ${url}`;
+
+              console.log(`Coincidencia encontrada: ${id}`);
+
+              execFileSync('curl', [
+                '-s',
+                '-X', 'POST',
+                `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`,
+                '-d', `chat_id=${process.env.TELEGRAM_CHAT_ID}`,
+                '--data-urlencode', `text=${message}`
+              ]);
+
+              console.log('Notificación enviada a Telegram.');
+            }
+          }
+
+          // Guardamos el estado.
+          state.lastSeenTimestamp = newestTimestamp;
+
+          // Conservamos los últimos 500 IDs para evitar duplicados.
+          state.processedIds = Array.from(processed).slice(-500);
+
+          fs.mkdirSync('data', { recursive: true });
+          fs.writeFileSync(stateFile, JSON.stringify(state, null, 2));
+
+          console.log(`Último timestamp registrado: ${newestTimestamp}`);
+          NODE
+
+      - name: Guardar estado
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add data/epec-state.json
+
+          if git diff --cached --quiet; then
+            echo "No hay cambios en el estado."
+          else
+            git commit -m "Actualizar estado del monitor EPEC"
+            git push
+          fi
