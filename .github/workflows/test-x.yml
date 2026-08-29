@@ -82,8 +82,8 @@ jobs:
           */
 
           const KEYWORDS = [
-            'falla',
-            'mantenimiento'
+            'Estación Flores',
+            'interconectado nacional'
           ];
 
           if (!X_AUTH_TOKEN) {
