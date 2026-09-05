@@ -1,0 +1,220 @@
+name: Diagnóstico EPEC
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnostico:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Instalar Playwright
+        run: |
+          npm init -y
+          npm install playwright
+          npx playwright install --with-deps chromium
+
+      - name: Diagnosticar acceso a EPEC
+        env:
+          X_AUTH_TOKEN: ${{ secrets.X_AUTH_TOKEN }}
+        run: |
+          cat > diagnostico-epec.js <<'NODE'
+          const { chromium } = require('playwright');
+
+          const X_AUTH_TOKEN = process.env.X_AUTH_TOKEN;
+
+          if (!X_AUTH_TOKEN) {
+            throw new Error('Falta el Secret X_AUTH_TOKEN');
+          }
+
+          (async () => {
+            const browser = await chromium.launch({
+              headless: true
+            });
+
+            const context = await browser.newContext({
+              userAgent:
+                'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 ' +
+                '(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+            });
+
+            await context.addCookies([
+              {
+                name: 'auth_token',
+                value: X_AUTH_TOKEN,
+                domain: '.x.com',
+                path: '/',
+                httpOnly: true,
+                secure: true,
+                sameSite: 'Lax'
+              }
+            ]);
+
+            const page = await context.newPage();
+
+            console.log('==========================================');
+            console.log('DIAGNÓSTICO EPEC');
+            console.log('==========================================');
+
+            console.log('Abriendo @EpecOficial...');
+
+            await page.goto(
+              'https://x.com/EpecOficial',
+              {
+                waitUntil: 'domcontentloaded',
+                timeout: 60000
+              }
+            );
+
+            console.log('');
+            console.log('URL final:', page.url());
+            console.log('Título:', await page.title());
+
+            await page.waitForTimeout(10000);
+
+            console.log('');
+            console.log('Después de esperar 10 segundos:');
+            console.log('URL:', page.url());
+            console.log('Título:', await page.title());
+
+            // =====================================================
+            // COMPROBAR ELEMENTOS
+            // =====================================================
+
+            const tweetsOldSelector =
+              await page.locator(
+                'article[data-testid="tweet"]'
+              ).count();
+
+            const articles =
+              await page.locator('article').count();
+
+            const statusLinks =
+              await page.locator('a[href*="/status/"]').count();
+
+            console.log('');
+            console.log('==========================================');
+            console.log('ELEMENTOS ENCONTRADOS');
+            console.log('==========================================');
+            console.log(
+              'article[data-testid="tweet"]:',
+              tweetsOldSelector
+            );
+            console.log('article:', articles);
+            console.log('links /status/:', statusLinks);
+
+            // =====================================================
+            // TEXTO VISIBLE
+            // =====================================================
+
+            const bodyText =
+              await page.locator('body').innerText();
+
+            console.log('');
+            console.log('==========================================');
+            console.log('TEXTO VISIBLE DE X');
+            console.log('==========================================');
+
+            console.log(
+              bodyText.substring(0, 5000)
+            );
+
+            // =====================================================
+            // COMPROBAR LOGIN / BLOQUEO / VERIFICACIÓN
+            // =====================================================
+
+            console.log('');
+            console.log('==========================================');
+            console.log('DIAGNÓSTICO DE ESTADO');
+            console.log('==========================================');
+
+            const checks = [
+              ['¿Contiene "Iniciar sesión"?',
+                bodyText.toLowerCase().includes('iniciar sesión')],
+              ['¿Contiene "log in"?',
+                bodyText.toLowerCase().includes('log in')],
+              ['¿Contiene "sign in"?',
+                bodyText.toLowerCase().includes('sign in')],
+              ['¿Contiene "verificación"?',
+                bodyText.toLowerCase().includes('verificación')],
+              ['¿Contiene "try again"?',
+                bodyText.toLowerCase().includes('try again')],
+              ['¿Contiene "Something went wrong"?',
+                bodyText.toLowerCase().includes('something went wrong')],
+              ['¿Contiene "No hay publicaciones"?',
+                bodyText.toLowerCase().includes('no hay publicaciones')]
+            ];
+
+            for (const [label, value] of checks) {
+              console.log(label, value ? 'SÍ' : 'NO');
+            }
+
+            // =====================================================
+            // MOSTRAR ALGUNOS LINKS /STATUS/
+            // =====================================================
+
+            const links =
+              await page.locator(
+                'a[href*="/status/"]'
+              ).evaluateAll(els =>
+                els.slice(0, 10).map(a => ({
+                  href: a.href,
+                  text: (a.innerText || '').trim()
+                }))
+              );
+
+            console.log('');
+            console.log('==========================================');
+            console.log('PRIMEROS LINKS /STATUS/');
+            console.log('==========================================');
+
+            console.log(
+              JSON.stringify(links, null, 2)
+            );
+
+            // =====================================================
+            // SCREENSHOT
+            // =====================================================
+
+            await page.screenshot({
+              path: 'diagnostico-epec.png',
+              fullPage: true
+            });
+
+            console.log('');
+            console.log('Screenshot guardado como diagnostico-epec.png');
+
+            await browser.close();
+
+            console.log('');
+            console.log('==========================================');
+            console.log('DIAGNÓSTICO TERMINADO');
+            console.log('==========================================');
+          })().catch(error => {
+            console.error('');
+            console.error('❌ ERROR:');
+            console.error(error);
+            process.exit(1);
+          });
+          NODE
+
+          node diagnostico-epec.js
+
+      - name: Subir diagnóstico visual
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostico-epec
+          path: diagnostico-epec.png
+          if-no-files-found: ignore
