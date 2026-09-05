@@ -2,17 +2,8 @@ name: Monitor EPEC
 
 on:
   workflow_dispatch:
-
   repository_dispatch:
-    types:
-      - epec_check
-      
-permissions:
-  contents: write
-
-concurrency:
-  group: monitor-epec
-  cancel-in-progress: true
+    types: [monitor-epec]
 
 jobs:
   monitor:
@@ -21,10 +12,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Configurar Node.js
+      - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -33,155 +22,84 @@ jobs:
         run: |
           npm init -y
           npm install playwright
-          npx playwright install --with-deps chromium
+          npx playwright install chromium --with-deps
 
-      - name: Crear estado inicial si no existe
-        run: |
-          mkdir -p data
-
-          if [ ! -f data/epec-state.json ]; then
-            echo '{"initialized":false,"last_seen_id":null,"last_seen_time":null}' > data/epec-state.json
-          fi
-
-          echo "Estado actual:"
-          cat data/epec-state.json
-
-      - name: Ejecutar monitor EPEC
+      - name: Crear monitor-epec.js
         env:
           X_AUTH_TOKEN: ${{ secrets.X_AUTH_TOKEN }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           cat > monitor-epec.js <<'NODE'
-          const fs = require('fs');
           const { chromium } = require('playwright');
-
-          const STATE_FILE = 'data/epec-state.json';
+          const fs = require('fs');
 
           const X_AUTH_TOKEN = process.env.X_AUTH_TOKEN;
           const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
           const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
-          /*
-          ==========================================================
-          PALABRAS CLAVE
-          ==========================================================
-
-          MODIFICÁ SOLAMENTE ESTA LISTA SI QUERÉS CAMBIAR
-          LAS PALABRAS QUE EL MONITOR DEBE BUSCAR.
-
-          Ejemplo:
-
-          const KEYWORDS = [
-            'corte',
-            'emergencia',
-            'transformador'
-          ];
-
-          ==========================================================
-          */
+          const STATE_FILE = 'data/epec-state.json';
 
           const KEYWORDS = [
             'Estación Flores',
             'interconectado nacional'
           ];
 
-          if (!X_AUTH_TOKEN) {
-            throw new Error('Falta el Secret X_AUTH_TOKEN');
-          }
-
-          if (!TELEGRAM_BOT_TOKEN) {
-            throw new Error('Falta el Secret TELEGRAM_BOT_TOKEN');
-          }
-
-          if (!TELEGRAM_CHAT_ID) {
-            throw new Error('Falta el Secret TELEGRAM_CHAT_ID');
-          }
-
           function normalize(text) {
-            return String(text || '')
+            return text
               .toLowerCase()
               .normalize('NFD')
               .replace(/[\u0300-\u036f]/g, '');
           }
 
-          function getMatchedKeywords(text) {
-            const normalizedText = normalize(text);
-
-            return KEYWORDS.filter(keyword =>
-              normalizedText.includes(normalize(keyword))
-            );
-          }
-
           function loadState() {
-            try {
-              return JSON.parse(
-                fs.readFileSync(STATE_FILE, 'utf8')
-              );
-            } catch {
+            if (!fs.existsSync(STATE_FILE)) {
               return {
                 initialized: false,
                 last_seen_id: null,
                 last_seen_time: null
               };
             }
+
+            return JSON.parse(
+              fs.readFileSync(STATE_FILE, 'utf8')
+            );
           }
 
           function saveState(state) {
+            fs.mkdirSync('data', { recursive: true });
+
             fs.writeFileSync(
               STATE_FILE,
-              JSON.stringify(state, null, 2) + '\n'
+              JSON.stringify(state, null, 2)
             );
           }
 
-          async function sendTelegram(tweet, matchedKeywords) {
-            const argentinaDate = new Intl.DateTimeFormat(
-              'es-AR',
-              {
-                timeZone: 'America/Argentina/Cordoba',
-                year: 'numeric',
-                month: '2-digit',
-                day: '2-digit',
-                hour: '2-digit',
-                minute: '2-digit',
-                second: '2-digit',
-                hour12: false
-              }
-            ).format(new Date(tweet.time));
+          async function sendTelegram(message) {
+            const url =
+              `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
 
-            const message =
-              `🚨 EPEC - ALERTA\n\n` +
-              `${tweet.text}\n\n` +
-              `🔎 Detectado: ${matchedKeywords.join(' / ')}\n` +
-              `🕐 ${argentinaDate}\n` +
-              `🔗 ${tweet.link}`;
+            const response = await fetch(url, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify({
+                chat_id: TELEGRAM_CHAT_ID,
+                text: message,
+                disable_web_page_preview: true
+              })
+            });
 
-            const response = await fetch(
-              `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
-              {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                  chat_id: TELEGRAM_CHAT_ID,
-                  text: message,
-                  disable_web_page_preview: false
-                })
-              }
-            );
+            if (!response.ok) {
+              const body = await response.text();
 
-            const result = await response.json();
-
-            if (!result.ok) {
               throw new Error(
-                `Telegram respondió con error: ${JSON.stringify(result)}`
+                `Telegram error ${response.status}: ${body}`
               );
             }
 
-            console.log(
-              `✅ Telegram: alerta enviada para ${tweet.id}`
-            );
+            console.log('✅ Alerta enviada a Telegram.');
           }
 
           async function getTweets() {
@@ -191,10 +109,8 @@ jobs:
 
             const context = await browser.newContext({
               userAgent:
-                'Mozilla/5.0 (X11; Linux x86_64) ' +
-                'AppleWebKit/537.36 ' +
-                '(KHTML, like Gecko) ' +
-                'Chrome/131.0.0.0 Safari/537.36'
+                'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 ' +
+                '(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
             });
 
             await context.addCookies([
@@ -221,15 +137,79 @@ jobs:
               }
             );
 
-            await page.waitForTimeout(5000);
+            console.log(
+              'URL inicial:',
+              page.url()
+            );
 
-            console.log('URL:', page.url());
+            console.log(
+              'Título inicial:',
+              await page.title()
+            );
 
-            await page.locator(
-              'article[data-testid="tweet"]'
-            ).first()
-              .waitFor({ timeout: 30000 })
-              .catch(() => {});
+            console.log(
+              'Esperando que X/Cloudflare termine de cargar...'
+            );
+
+            let tweetCount = 0;
+
+            for (let attempt = 1; attempt <= 6; attempt++) {
+              await page.waitForTimeout(10000);
+
+              tweetCount = await page.locator(
+                'article[data-testid="tweet"]'
+              ).count();
+
+              console.log(
+                `Intento ${attempt}/6 - publicaciones encontradas: ${tweetCount}`
+              );
+
+              console.log(
+                'URL:',
+                page.url()
+              );
+
+              console.log(
+                'Título:',
+                await page.title()
+              );
+
+              if (tweetCount > 0) {
+                break;
+              }
+
+              if (attempt < 6) {
+                console.log(
+                  'Todavía no hay publicaciones. Recargando...'
+                );
+
+                await page.reload({
+                  waitUntil: 'domcontentloaded',
+                  timeout: 60000
+                });
+              }
+            }
+
+            if (tweetCount === 0) {
+              console.log(
+                'No se encontraron publicaciones después de todos los intentos.'
+              );
+
+              const bodyText = await page.locator('body').innerText()
+                .catch(() => '');
+
+              console.log(
+                'Contenido de la página:'
+              );
+
+              console.log(
+                bodyText.substring(0, 3000)
+              );
+
+              await browser.close();
+
+              return [];
+            }
 
             const tweets = await page.locator(
               'article[data-testid="tweet"]'
@@ -283,16 +263,10 @@ jobs:
               );
           }
 
-          (async () => {
-            console.log('');
-            console.log('==========================================');
-            console.log('MONITOR EPEC');
-            console.log('==========================================');
-            console.log('');
-
-            console.log('Palabras monitoreadas:');
-            console.log(KEYWORDS.join(', '));
-            console.log('');
+          async function main() {
+            console.log('====================================');
+            console.log('       MONITOR EPEC');
+            console.log('====================================');
 
             const state = loadState();
 
@@ -300,15 +274,12 @@ jobs:
             console.log(
               JSON.stringify(state, null, 2)
             );
-            console.log('');
 
             const tweets = await getTweets();
 
-            console.log('');
             console.log(
               `Publicaciones encontradas: ${tweets.length}`
             );
-            console.log('');
 
             if (tweets.length === 0) {
               throw new Error(
@@ -316,27 +287,16 @@ jobs:
               );
             }
 
-            const newest =
-              tweets[tweets.length - 1];
+            const newest = tweets[tweets.length - 1];
 
+            console.log('Publicación más reciente:');
             console.log(
-              'Publicación más reciente:'
+              JSON.stringify(newest, null, 2)
             );
-            console.log(newest.time);
-            console.log(newest.id);
-            console.log(newest.text);
-            console.log('');
 
-            // =====================================================
-            // PRIMERA EJECUCIÓN
-            // =====================================================
-
-            if (
-              !state.initialized ||
-              !state.last_seen_id
-            ) {
+            if (!state.initialized) {
               console.log(
-                '🟡 Primera ejecución: inicializando estado.'
+                'Primera ejecución. Inicializando estado sin enviar alertas históricas.'
               );
 
               state.initialized = true;
@@ -346,120 +306,101 @@ jobs:
               saveState(state);
 
               console.log(
-                `Estado inicial guardado con ID ${newest.id}`
+                'Estado inicial guardado.'
               );
 
-              console.log(
-                'No se enviarán publicaciones históricas.'
-              );
-
-              process.exit(0);
+              return;
             }
 
-            // =====================================================
-            // BUSCAR PUBLICACIONES NUEVAS
-            // =====================================================
+            const newTweets = tweets.filter(tweet => {
+              if (
+                tweet.id === state.last_seen_id
+              ) {
+                return false;
+              }
 
-            let newTweets = [];
+              if (
+                state.last_seen_time &&
+                new Date(tweet.time) <=
+                  new Date(state.last_seen_time)
+              ) {
+                return false;
+              }
 
-            const lastSeenIndex =
-              tweets.findIndex(
-                tweet =>
-                  tweet.id === state.last_seen_id
-              );
-
-            if (lastSeenIndex >= 0) {
-              newTweets =
-                tweets.slice(lastSeenIndex + 1);
-            } else {
-              const lastSeenTime =
-                state.last_seen_time
-                  ? new Date(
-                      state.last_seen_time
-                    ).getTime()
-                  : 0;
-
-              newTweets =
-                tweets.filter(tweet =>
-                  new Date(tweet.time).getTime() >
-                  lastSeenTime
-                );
-            }
+              return true;
+            });
 
             console.log(
               `Publicaciones nuevas encontradas: ${newTweets.length}`
             );
-            console.log('');
-
-            // =====================================================
-            // PROCESAR PUBLICACIONES NUEVAS
-            // =====================================================
 
             for (const tweet of newTweets) {
-              console.log(
-                '------------------------------------------'
-              );
-
-              console.log(tweet.time);
-              console.log(tweet.id);
+              console.log('');
+              console.log('------------------------------------');
+              console.log('Nueva publicación:');
               console.log(tweet.text);
+              console.log('ID:', tweet.id);
+              console.log('Fecha:', tweet.time);
+              console.log('URL:', tweet.link);
 
-              const matchedKeywords =
-                getMatchedKeywords(tweet.text);
+              const normalizedText =
+                normalize(tweet.text);
 
-              if (matchedKeywords.length > 0) {
+              const matchedKeyword =
+                KEYWORDS.find(keyword =>
+                  normalizedText.includes(
+                    normalize(keyword)
+                  )
+                );
+
+              if (matchedKeyword) {
                 console.log(
-                  `🔔 Palabras detectadas: ${matchedKeywords.join(', ')}`
+                  `🚨 Coincidencia encontrada: "${matchedKeyword}"`
                 );
 
-                await sendTelegram(
-                  tweet,
-                  matchedKeywords
-                );
+                const message =
+                  `🚨 EPEC - Alerta\n\n` +
+                  `${tweet.text}\n\n` +
+                  `${tweet.link}`;
+
+                await sendTelegram(message);
               } else {
                 console.log(
-                  'ℹ️ No contiene palabras monitoreadas.'
+                  'Sin coincidencia de palabras clave.'
                 );
               }
-
-              console.log('');
             }
 
-            // =====================================================
-            // ACTUALIZAR ESTADO
-            // =====================================================
-
-            state.initialized = true;
             state.last_seen_id = newest.id;
             state.last_seen_time = newest.time;
 
             saveState(state);
 
-            console.log(
-              '=========================================='
-            );
-            console.log(
-              'MONITOR FINALIZADO'
-            );
-            console.log(
-              '=========================================='
-            );
             console.log('');
-
             console.log(
-              `Último ID guardado: ${state.last_seen_id}`
+              'Estado actualizado:'
             );
 
-          })().catch(error => {
-            console.error('');
-            console.error('❌ ERROR:');
-            console.error(error);
-            console.error('');
+            console.log(
+              JSON.stringify(state, null, 2)
+            );
+          }
 
-            process.exit(1);
-          });
+          main()
+            .then(() => {
+              console.log('');
+              console.log('✅ Monitor finalizado correctamente.');
+            })
+            .catch(error => {
+              console.error('');
+              console.error('❌ ERROR:');
+              console.error(error);
+              process.exit(1);
+            });
           NODE
 
+      - name: Ejecutar monitor
+        run: |
           node monitor-epec.js
 
       - name: Guardar estado
@@ -469,9 +410,8 @@ jobs:
 
           git add data/epec-state.json
 
-          if git diff --cached --quiet; then
-            echo "No hay cambios en el estado."
-          else
-            git commit -m "Actualizar estado monitor EPEC"
-            git push
-          fi
+          git diff --cached --quiet || git commit -m "Actualizar estado EPEC"
+
+          git push
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
